@@ -11,6 +11,7 @@ import mediapipe as mp
 import numpy as np
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.image import img_to_array
+import traceback
 
 # Configuration constants
 WINDOW_TITLE = "AirWrite AI Assistant"
@@ -284,6 +285,24 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
     pinch_above_frames = 0
 
     model, class_map = load_classifier(model_path, label_map_path)
+    # Keep keyboard input state local to avoid assigning to the module-level
+    # constant which would require a 'global' declaration. This keeps runtime
+    # toggle state inside the function and avoids UnboundLocalError.
+    keyboard_input_enabled = KEYBOARD_INPUT_ENABLED
+
+    def reset_canvas_state() -> None:
+        """Clear the canvas and gesture history so the next glyph starts fresh."""
+        nonlocal canvas_last_point, smoothed_point, pinch_distance_smoothed
+        nonlocal pinch_below_frames, pinch_above_frames, pen_down
+        canvas.fill(255)
+        fingertip_trail.clear()
+        canvas_last_point = None
+        smoothed_point = None
+        pinch_distance_smoothed = None
+        pinch_below_frames = 0
+        pinch_above_frames = PINCH_OFF_FRAMES
+        if use_pinch_control:
+            pen_down = False
 
     try:
         # Create the named window up-front to avoid a race where getWindowProperty
@@ -392,26 +411,11 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
 
             key = cv2.waitKey(1) & 0xFF
 
-            # getWindowProperty returns:
-            #  1.0 -> visible, 0.0 -> closed/hidden, -1 -> window not found/unknown
-            # Only break when the window is explicitly closed (== 0.0). Treat -1 as
-            # "unknown" and keep running to avoid accidental early exit on some OS
-            # / OpenCV combinations.
-            win_prop = cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE)
-            if win_prop == 0.0:
-                break
-
+            # key handling (moved inside main loop so exceptions won't drop us out)
             if key == ord("q"):
                 break
             if key == ord("c"):
-                canvas.fill(255)
-                fingertip_trail.clear()
-                canvas_last_point = None
-                smoothed_point = None
-                pinch_below_frames = 0
-                pinch_above_frames = PINCH_OFF_FRAMES
-                if use_pinch_control:
-                    pen_down = False
+                reset_canvas_state()
             if key == ord("s"):
                 filename = "char.png"
                 cv2.imwrite(filename, canvas)
@@ -423,14 +427,7 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
                     last_result = None
                 else:
                     print("[INFO] Unable to predict character. Ensure model is loaded.")
-                canvas.fill(255)
-                fingertip_trail.clear()
-                canvas_last_point = None
-                smoothed_point = None
-                pinch_below_frames = 0
-                pinch_above_frames = PINCH_OFF_FRAMES
-                if use_pinch_control:
-                    pen_down = False
+                reset_canvas_state()
             if key == ord("p"):
                 # Predict the whole canvas as an expression by segmenting it
                 predicted_expr = segment_and_predict(canvas, model, class_map)
@@ -443,19 +440,12 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
                     text_buffer.append(predicted_expr)
                     last_result = None
                     # clear canvas for next expression
-                    canvas.fill(255)
-                    fingertip_trail.clear()
-                    canvas_last_point = None
-                    smoothed_point = None
-                    pinch_below_frames = 0
-                    pinch_above_frames = PINCH_OFF_FRAMES
-                    if use_pinch_control:
-                        pen_down = False
+                    reset_canvas_state()
             if key == 32:  # Spacebar
                 text_buffer.append(" ")
                 last_result = None
             # Accept printable keyboard characters to append to buffer for testing when enabled
-            if KEYBOARD_INPUT_ENABLED:
+            if keyboard_input_enabled:
                 if 32 < key < 127 and chr(key) in "0123456789+-*/()=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz":
                     ch = chr(key)
                     text_buffer.append(ch)
@@ -463,27 +453,43 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
                     print(f"[INFO] Appended '{ch}' to buffer (keyboard test).")
             # toggle keyboard input
             if key == ord("k"):
-                KEYBOARD_INPUT_ENABLED = not KEYBOARD_INPUT_ENABLED
-                state = "enabled" if KEYBOARD_INPUT_ENABLED else "disabled"
+                keyboard_input_enabled = not keyboard_input_enabled
+                state = "enabled" if keyboard_input_enabled else "disabled"
                 print(f"[INFO] Keyboard input {state}. Press 'k' to toggle.")
             if key in (13, 10):  # Enter key variants
-                _, last_result = evaluate_text_buffer(text_buffer)
+                if text_buffer:
+                    _, last_result = evaluate_text_buffer(text_buffer)
+                else:
+                    predicted_expr = segment_and_predict(canvas, model, class_map)
+                    if predicted_expr is None:
+                        print("[INFO] No model loaded - cannot evaluate canvas. Provide a model with --model or place it at models/airwrite_cnn.h5")
+                    elif predicted_expr == "":
+                        print("[INFO] No drawn content detected on the canvas to evaluate.")
+                    else:
+                        text_buffer.append(predicted_expr)
+                        _, last_result = evaluate_text_buffer(text_buffer)
+                        print(f"[INFO] Evaluated canvas expression '{predicted_expr}': {last_result}")
+                        reset_canvas_state()
             if key == ord("b"):
                 # Optional backspace support
                 if text_buffer:
                     text_buffer.pop()
                     last_result = None
             if key == ord("t"):
-                use_pinch_control = not use_pinch_control
-                append_trail_point(fingertip_trail, None)
-                canvas_last_point = None
-                smoothed_point = None
-                pinch_distance_smoothed = None
-                pen_down = False
-                pinch_below_frames = 0
-                pinch_above_frames = PINCH_OFF_FRAMES
-                mode_name = "pinch" if use_pinch_control else "manual"
-                print(f"[INFO] Switched to {mode_name} drawing mode.")
+                # if FORCE_PINCH_ONLY is set, don't allow toggling away from pinch mode
+                if FORCE_PINCH_ONLY:
+                    print("[INFO] pinch-only mode enforced; cannot toggle to manual.")
+                else:
+                    use_pinch_control = not use_pinch_control
+                    append_trail_point(fingertip_trail, None)
+                    canvas_last_point = None
+                    smoothed_point = None
+                    pinch_distance_smoothed = None
+                    pen_down = False
+                    pinch_below_frames = 0
+                    pinch_above_frames = PINCH_OFF_FRAMES
+                    mode_name = "pinch" if use_pinch_control else "manual"
+                    print(f"[INFO] Switched to {mode_name} drawing mode.")
             if key == ord("d"):
                 if not use_pinch_control:
                     pen_down = not pen_down
@@ -492,6 +498,19 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
                         append_trail_point(fingertip_trail, None)
                         canvas_last_point = None
                     print(f"[INFO] Manual pen is now {state}.")
+
+            # getWindowProperty returns:
+            #  1.0 -> visible, 0.0 -> closed/hidden, -1 -> window not found/unknown
+            # Only break when the window is explicitly closed (== 0.0). Treat -1 as
+            # "unknown" and keep running to avoid accidental early exit on some OS
+            # / OpenCV combinations.
+            win_prop = cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE)
+            if win_prop == 0.0:
+                break
+        
+    except Exception as exc:  # top-level safety: print and exit gracefully
+        print("[ERROR] Unhandled exception while running the app:")
+        traceback.print_exc()
 
     finally:
         cap.release()
