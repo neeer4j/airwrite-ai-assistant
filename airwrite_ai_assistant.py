@@ -286,6 +286,10 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
     model, class_map = load_classifier(model_path, label_map_path)
 
     try:
+        # Create the named window up-front to avoid a race where getWindowProperty
+        # returns an unexpected value right after the first imshow and causes
+        # the app to exit immediately.
+        cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -388,7 +392,13 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
 
             key = cv2.waitKey(1) & 0xFF
 
-            if cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE) < 1:
+            # getWindowProperty returns:
+            #  1.0 -> visible, 0.0 -> closed/hidden, -1 -> window not found/unknown
+            # Only break when the window is explicitly closed (== 0.0). Treat -1 as
+            # "unknown" and keep running to avoid accidental early exit on some OS
+            # / OpenCV combinations.
+            win_prop = cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE)
+            if win_prop == 0.0:
                 break
 
             if key == ord("q"):
