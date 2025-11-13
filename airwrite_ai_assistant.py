@@ -25,6 +25,7 @@ PINCH_SMOOTHING = 0.12
 POINT_SMOOTHING = 0.25
 PINCH_ON_FRAMES = 5
 PINCH_OFF_FRAMES = 1
+FORCE_PINCH_ONLY = True  # when True, disable manual mode and force pinch as input source
 DEFAULT_MODEL_PATH = os.path.join("models", "airwrite_cnn.h5")
 DEFAULT_LABEL_MAP_PATH = os.path.join("models", "label_map.json")
 DEFAULT_CLASS_MAP = {
@@ -230,6 +231,7 @@ def render_ui(
         "t = toggle pinch/manual",
         "p = predict whole canvas (append)",
         "s = save & predict",
+        "keyboard: type characters to append to buffer (for testing)",
         "space = insert space",
         "enter = evaluate (no '=' needed)",
         "b = backspace",
@@ -421,7 +423,7 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
                 # Predict the whole canvas as an expression by segmenting it
                 predicted_expr = segment_and_predict(canvas, model, class_map)
                 if predicted_expr is None:
-                    print("[INFO] No model loaded - cannot predict whole canvas.")
+                    print("[INFO] No model loaded - cannot predict whole canvas. Provide a model with --model or put it at models/airwrite_cnn.h5")
                 elif predicted_expr == "":
                     print("[INFO] No shapes detected on canvas to predict.")
                 else:
@@ -440,6 +442,12 @@ def run_airwrite(model_path: str, label_map_path: Optional[str]) -> None:
             if key == 32:  # Spacebar
                 text_buffer.append(" ")
                 last_result = None
+            # Accept printable keyboard characters to append to buffer for testing without a model
+            if 32 < key < 127 and chr(key) in "0123456789+-*/()=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz":
+                ch = chr(key)
+                text_buffer.append(ch)
+                last_result = None
+                print(f"[INFO] Appended '{ch}' to buffer (keyboard test).")
             if key in (13, 10):  # Enter key variants
                 _, last_result = evaluate_text_buffer(text_buffer)
             if key == ord("b"):
